@@ -1,11 +1,9 @@
 from aws_cdk import (
     RemovalPolicy,
-    aws_s3_assets,
     Stack,
     aws_lambda as _lambda,
     aws_sqs as sqs,
     aws_dynamodb as dynamodb,
-    aws_iam as iam,
     aws_apigateway as apigateway,
 )
 from constructs import Construct
@@ -39,7 +37,12 @@ class TaIacInfraStack(Stack):
                 "y",
                 bundling={
                     "image": _lambda.Runtime.PYTHON_3_11.bundling_image,
-                     "command": ["bash", "-c", "pip install -r requirements.txt -t /asset-output && cp -r . /asset-output"],},
+                    "command": [
+                        "bash",
+                        "-c",
+                        "pip install -r requirements.txt -t /asset-output && cp -r . /asset-output"
+                    ],
+                },
             ),
             environment={
                 "QUEUE_URL": queue.queue_url
@@ -56,7 +59,12 @@ class TaIacInfraStack(Stack):
                 "y",
                 bundling={
                     "image": _lambda.Runtime.PYTHON_3_11.bundling_image,
-                    "command": ["bash", "-c", "pip install -r requirements.txt -t /asset-output && cp -r . /asset-output"],},
+                    "command": [
+                        "bash",
+                        "-c",
+                        "pip install -r requirements.txt -t /asset-output && cp -r . /asset-output"
+                    ],
+                },
             ),
             environment={
                 "TABLE_NAME": table.table_name
@@ -75,16 +83,24 @@ class TaIacInfraStack(Stack):
             batch_size=1
         )
 
-        # 7️⃣ API Gateway to trigger Submitter Lambda
+        # 7️⃣ API Gateway to trigger Submitter Lambda (with full CORS support)
         api = apigateway.LambdaRestApi(
             self, "TaIacAPIO",
             handler=submitter_lambda,
-            proxy=False
+            proxy=False,
+            default_cors_preflight_options=apigateway.CorsOptions(
+                allow_origins=apigateway.Cors.ALL_ORIGINS,
+                allow_methods=apigateway.Cors.ALL_METHODS,
+                allow_headers=["Content-Type", "X-Amz-Date", "Authorization", "X-Api-Key"]
+            )
         )
 
         scans = api.root.add_resource("scan")
         scans.add_method("POST")  # POST /scan
+
+
 import aws_cdk as cdk
+
 app = cdk.App()
 stack = TaIacInfraStack(app, "TaIacInfraStack")
 app.synth()

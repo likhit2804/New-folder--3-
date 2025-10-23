@@ -1,12 +1,19 @@
 import json
 
+# backend/y/lib/parser.py
+import json
+
 def parse_iac_plan(iac_json):
     resources = []
-    for res in iac_json.get('resource_changes', []):
+    # CORRECTED: Traverse through the nested structure to find the resources
+    root_module = iac_json.get('planned_values', {}).get('root_module', {})
+    for res in root_module.get('resources', []):
         resource = {
-            'type': res['type'],
-            'name': res['name'],
-            'change': res['change'],
+            # Use the 'type' and 'name' directly from the resource object
+            'type': res.get('type'),
+            'name': res.get('name'),
+            # Pass the entire 'values' dictionary for context
+            'change': res.get('values', {}),
         }
         resources.append(resource)
     return resources

@@ -7,7 +7,7 @@ from lib.risk_scoring import calculate_risk
 from lib.explanation_builder import build_explanation
 
 dynamodb = boto3.resource('dynamodb')
-TABLE_NAME = os.environ.get('DYNAMODB_TABLE', 'TaIacScanResults-1')
+TABLE_NAME = os.environ.get('DYNAMODB_TABLE', 'TaIacScanResults-2')
 table = dynamodb.Table(TABLE_NAME)
 
 def lambda_handler(event, context):

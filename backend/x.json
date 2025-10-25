@@ -1,0 +1,58 @@
+{
+  "format_version": "0.1",
+  "terraform_version": "1.6.0",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_s3_bucket.mybucket",
+          "mode": "managed",
+          "type": "aws_s3_bucket",
+          "name": "mybucket",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "values": {
+            "bucket": "example-public-bucket",
+            "acl": "public-read",
+            "force_destroy": true,
+            "tags": {
+              "Environment": "Dev"
+            }
+          }
+        },
+        {
+          "address": "aws_security_group.web_sg",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "web_sg",
+          "provider_name": "registry.terraform.io/hashicorp/aws",
+          "values": {
+            "name": "web_sg",
+            "description": "Allow SSH and HTTP",
+            "ingress": [
+              {
+                "from_port": 22,
+                "to_port": 22,
+                "protocol": "tcp",
+                "cidr_blocks": ["0.0.0.0/0"]
+              },
+              {
+                "from_port": 80,
+                "to_port": 80,
+                "protocol": "tcp",
+                "cidr_blocks": ["0.0.0.0/0"]
+              }
+            ],
+            "egress": [
+              {
+                "from_port": 0,
+                "to_port": 0,
+                "protocol": "-1",
+                "cidr_blocks": ["0.0.0.0/0"]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

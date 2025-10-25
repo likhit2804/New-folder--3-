@@ -17,8 +17,9 @@ SHODAN_API_KEY ="5860982614fbc026afec4c4f2eb5ec10be21c1eb706be904a6a83d485abb59f
 ABUSEIPDB_API_KEY ="5860982614fbc026afec4c4f2eb5ec10be21c1eb706be904a6a83d485abb59fb4eed8e1dc9bf3e77"
 DYNAMODB_CACHE_TABLE_NAME = os.environ.get("CACHE_TABLE_NAME")
 CACHE_TTL_SECONDS = 3600
+HEALTH_STATUS_KEY = "_HEALTH_STATUS_" # Key for storing health data
 
-# --- DynamoDB cache setup (reused from your snippet) ---
+# --- DynamoDB cache setup ---
 dynamodb = boto3.resource('dynamodb')
 cache_table = None
 if DYNAMODB_CACHE_TABLE_NAME:
@@ -55,6 +56,29 @@ def set_cached_threat(cache_key, data):
         )
     except Exception as e:
         print(f"Error writing cache: {e}")
+
+# ✨ --- ADDED ---
+def get_feed_health():
+    """
+    Reads the health status blob from the cache, written by the HealthCheck Lambda.
+    """
+    if not cache_table:
+        print("Warning: Cannot check feed health, cache table not configured.")
+        return {} # Assume all healthy if cache is down
+    
+    try:
+        response = cache_table.get_item(Key={'cache_key': HEALTH_STATUS_KEY})
+        item = response.get('Item')
+        if item:
+            # Return a simple dict: {'shodan': 'HEALTHY', 'abuseipdb': 'DEGRADED'}
+            data = json.loads(item.get('data', '{}'))
+            status_dict = {feed: details.get('status', 'DEGRADED') for feed, details in data.items()}
+            return status_dict
+    except Exception as e:
+        print(f"Error reading health status from cache: {e}")
+    
+    return {} # Default to healthy if status item is missing or expired
+# --- END ADDED ---
 
 # --- utility to extract IPs from nested structures ---
 def _extract_ips_recursive(data):
@@ -205,15 +229,11 @@ def check_phishtank(resource):
     if cached:
         return cached
 
-    # PhishTank offers a lookup API for URLs and a downloadable database.
-    # Some endpoints require an API key; others allow small lookups.
     base_lookup = "https://checkurl.phishtank.com/checkurl/"
     evidence = []
     highest_risk = 'low'
 
-    # If resource contains URLs, check them
     try:
-        # gather candidate URLs from resource fields
         def _extract_urls(o):
             urls = set()
             if isinstance(o, str):
@@ -229,8 +249,6 @@ def check_phishtank(resource):
 
         urls = _extract_urls(resource)
         for url in urls:
-            # PhishTank accepts POST with url parameter returning XML (older) — many clients use their feed or a JSON wrapper.
-            # Here we attempt the simple checkurl POST which returns XML; we parse heuristically.
             try:
                 r = requests.post(base_lookup, data={"url": url}, timeout=10)
                 text = r.text.lower()
@@ -307,15 +325,18 @@ def check_abuseipdb(resource):
     return result
 
 
-# --- Main parallel runner / aggregator ---
+# --- Main parallel runner / aggregator (MODIFIED) ---
 def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
     """
     resource: dict with fields like 'name', 'type', possibly nested fields that contain IPs/URLs
     feeds: list of feed ids to run, e.g. ['shodan','alienvault','phishtank','abuseipdb','osint'] or None for all
-    Returns aggregated highest threat dict
+    
+    ✨ --- MODIFIED ---
+    Returns a tuple: (highest_threat_dict, skipped_feeds_list)
+    --- END MODIFIED ---
     """
     if feeds is None:
-        feeds = ['shodan', 'alienvault', 'phishtank', 'abuseipdb', 'osint']
+        feeds = ['shodan', 'alienvault', 'phishtank', 'abuseipdb'] # Removed 'osint' as it's not a feed
 
     feed_map = {
         'shodan': check_shodan,
@@ -323,6 +344,12 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
         'phishtank': check_phishtank,
         'abuseipdb': check_abuseipdb
     }
+
+    # ✨ --- ADDED ---
+    # Get the health status of all feeds
+    feed_health = get_feed_health()
+    skipped_feeds = []
+    # --- END ADDED ---
 
     tasks = []
     results = []
@@ -332,6 +359,15 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
             func = feed_map.get(f)
             if not func:
                 continue
+            
+            # ✨ --- ADDED ---
+            # Graceful Degradation Logic
+            if feed_health.get(f) == 'DEGRADED':
+                print(f"Skipping feed {f} as it is marked DEGRADED.")
+                skipped_feeds.append(f)
+                continue
+            # --- END ADDED ---
+                
             future = executor.submit(func, resource)
             future_to_feed[future] = f
 
@@ -346,10 +382,15 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
                 print(f"Feed {feed_name} failed: {e}")
                 traceback.print_exc()
                 results.append({'feed': feed_name, 'risk_level': 'low', 'evidence': f'Error: {e}'})
+                # ✨ --- ADDED ---
+                # If a feed fails, it was skipped
+                if feed_name not in skipped_feeds:
+                    skipped_feeds.append(feed_name) 
+                # --- END ADDED ---
 
     # If no results, return internal low
     if not results:
-        return {'feed': 'internal-assessment', 'risk_level': 'low', 'evidence': f"No threats identified for {resource.get('name','unknown')}"}
+        return {'feed': 'internal-assessment', 'risk_level': 'low', 'evidence': f"No threats identified for {resource.get('name','unknown')}"}, skipped_feeds
 
     # Determine highest risk across feeds
     risk_priority = {'low': 1, 'medium': 2, 'high': 3}
@@ -364,7 +405,9 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
         highest_threat['evidence'] = f"Highest risk: {highest_threat.get('risk_level')}. All findings: {combined_evidence}"
         highest_threat['feed'] = f"{highest_threat.get('feed')} (+{len(results)-1} other sources)"
 
-    return highest_threat
+    # ✨ --- MODIFIED ---
+    return highest_threat, skipped_feeds
+    # --- END MODIFIED ---
 
 # --- Example usage ---
 if __name__ == "__main__":
@@ -374,6 +417,6 @@ if __name__ == "__main__":
         "ip": "8.8.8.8",
         "urls": ["http://example.com/login", "https://malicious.example.test"]
     }
-    out = check_threat_feeds(sample)
+    out, skipped = check_threat_feeds(sample)
     print(json.dumps(out, indent=2))
-
+    print(f"Skipped feeds: {skipped}")

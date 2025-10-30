@@ -27,14 +27,14 @@ class TaIacInfraStack(Stack):
 
         # 1️⃣ & 1b. DynamoDB Tables (No Change)
         table = dynamodb.Table(
-            self, "TaIacScanResults-3",
-            table_name="TaIacScanResults-3",
+            self, "TaIacScanResults-5",
+            table_name="TaIacScanResults-5",
             partition_key={"name": "scan_id", "type": dynamodb.AttributeType.STRING},
             removal_policy=RemovalPolicy.DESTROY
         )
         cache_table = dynamodb.Table(
-            self, "TaThreatIntelCache-3",
-            table_name="TaThreatIntelCache-3", 
+            self, "TaThreatIntelCache-5",
+            table_name="TaThreatIntelCache-5", 
             partition_key={"name": "cache_key", "type": dynamodb.AttributeType.STRING},
             time_to_live_attribute="expires_at", 
             removal_policy=RemovalPolicy.DESTROY 
@@ -42,8 +42,8 @@ class TaIacInfraStack(Stack):
 
         # 2️⃣ SQS Queue (No Change)
         queue = sqs.Queue(
-            self, "TaIacScanQueue-3",
-            queue_name="TaIacScanQueue-3"
+            self, "TaIacScanQueue-5",
+            queue_name="TaIacScanQueue-5"
         )
 
         # Lambda Code Asset (No Change)
@@ -61,8 +61,8 @@ class TaIacInfraStack(Stack):
 
         # 3️⃣ Submitter Lambda (No Change)
         submitter_lambda = _lambda.Function(
-            self, "SubmitterLambda-3",
-            function_name="TaIacSubmitter-3",
+            self, "SubmitterLambda-5",
+            function_name="TaIacSubmitter-5",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="lambda.submitter_lambda.lambda_handler",
             code=lambda_code_asset,
@@ -74,12 +74,12 @@ class TaIacInfraStack(Stack):
 
         # 4️⃣ Worker Lambda (Modified)
         worker_lambda = _lambda.Function(
-            self, "WorkerLambda-3",
-            function_name="TaIacWorker-3",
+            self, "WorkerLambda-5",
+            function_name="TaIacWorker-5",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="lambda.worker_lambda.lambda_handler",
             code=lambda_code_asset,
-            timeout=Duration.seconds(30), 
+            timeout=Duration.seconds(300), 
             environment={
                 "TABLE_NAME": table.table_name,
                 "CACHE_TABLE_NAME": cache_table.table_name,
@@ -94,8 +94,8 @@ class TaIacInfraStack(Stack):
         
         # 4b. Health Check Lambda (Modified)
         health_check_lambda = _lambda.Function(
-            self, "HealthCheckLambda-3",
-            function_name="TaIacHealthChecker-3",
+            self, "HealthCheckLambda-5",
+            function_name="TaIacHealthChecker-5",
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="lambda.health_check_lambda.lambda_handler",
             code=lambda_code_asset,
@@ -114,7 +114,7 @@ class TaIacInfraStack(Stack):
         
         # 4c. Scheduled Rule (No Change)
         rule = events.Rule(
-            self, "HealthCheckRule-3",
+            self, "HealthCheckRule-5",
             schedule=events.Schedule.rate(Duration.minutes(15)),
         )
         rule.add_target(targets.LambdaFunction(health_check_lambda))
@@ -124,17 +124,17 @@ class TaIacInfraStack(Stack):
         queue.grant_consume_messages(worker_lambda)
         table.grant_write_data(worker_lambda)
         table.grant_write_data(submitter_lambda) 
-        cache_table.grant_read_write_data(worker_lambda) 
+        cache_table.grant_read_data(worker_lambda) 
         cache_table.grant_read_write_data(health_check_lambda)
         
         worker_lambda.add_event_source_mapping(
-            "SQSTrigger-3",
+            "SQSTrigger-5",
             event_source_arn=queue.queue_arn,
             batch_size=1
         )
 
         api = apigateway.LambdaRestApi(
-            self, "TaIacAPI-3",
+            self, "TaIacAPI-5",
             handler=submitter_lambda,
             proxy=False,
             default_cors_preflight_options=apigateway.CorsOptions(
@@ -146,8 +146,10 @@ class TaIacInfraStack(Stack):
         
         scans = api.root.add_resource("scans") 
         scans.add_method("POST")
+        scan_status = scans.add_resource("{scan_id}")
+        scan_status.add_method("GET")
 
 
 app = cdk.App()
-stack = TaIacInfraStack(app, "TaIacInfraStack-3") 
+stack = TaIacInfraStack(app, "TaIacInfraStack-5") 
 app.synth()

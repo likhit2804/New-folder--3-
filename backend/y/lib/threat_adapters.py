@@ -6,15 +6,16 @@ import ipaddress
 import requests
 import shodan
 import concurrent.futures
-
 import boto3
 
 # --- Config / env keys ---
-OTX_API_KEY ="9b032a104ead9b762b6e6a718cc7f52f8f570b8ba1bc240d91954c0bd71f255c"
-oss_API="9175e58c73b24cbaeb9a5ab83ac538c0d64ad877"
-PHISHTANK_API_KEY ="http://checkurl.phishtank.com/checkurl/"
-SHODAN_API_KEY ="5860982614fbc026afec4c4f2eb5ec10be21c1eb706be904a6a83d485abb59fb4eed8e1dc9bf3e77"
-ABUSEIPDB_API_KEY ="5860982614fbc026afec4c4f2eb5ec10be21c1eb706be904a6a83d485abb59fb4eed8e1dc9bf3e77"
+# CRITICAL: Load all keys from environment variables. Do not hardcode them.
+OTX_API_KEY = os.environ.get("OTX_API_KEY")
+# oss_API="9175e58c73b24cbaeb9a5ab83ac538c0d64ad877" # Unused?
+PHISHTANK_URL = "http://checkurl.phishtank.com/checkurl/" # Renamed variable
+SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY")
+ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY")
+
 DYNAMODB_CACHE_TABLE_NAME = os.environ.get("CACHE_TABLE_NAME")
 CACHE_TTL_SECONDS = 3600
 HEALTH_STATUS_KEY = "_HEALTH_STATUS_" # Key for storing health data
@@ -30,6 +31,15 @@ if DYNAMODB_CACHE_TABLE_NAME:
         print(f"Warning: Cache table not accessible: {e}")
         cache_table = None
 
+# --- Utility Function (Moved Up) ---
+def max_risk(a, b):
+    order = {'low': 1, 'medium': 2, 'high': 3}
+    # Handle potential None or invalid values gracefully
+    a_val = order.get(a, 1)
+    b_val = order.get(b, 1)
+    return a if a_val >= b_val else b
+
+# --- Cache Functions ---
 def get_cached_threat(cache_key):
     if not cache_table:
         return None
@@ -57,10 +67,11 @@ def set_cached_threat(cache_key, data):
     except Exception as e:
         print(f"Error writing cache: {e}")
 
-# ✨ --- ADDED ---
-def get_feed_health():
+# --- Health Check (Now read from Worker) ---
+def get_feed_health_from_cache():
     """
     Reads the health status blob from the cache, written by the HealthCheck Lambda.
+    This is called ONCE by the worker_lambda, not by check_threat_feeds.
     """
     if not cache_table:
         print("Warning: Cannot check feed health, cache table not configured.")
@@ -77,8 +88,7 @@ def get_feed_health():
     except Exception as e:
         print(f"Error reading health status from cache: {e}")
     
-    return {} # Default to healthy if status item is missing or expired
-# --- END ADDED ---
+    return {} # Default to healthy if status item is missing
 
 # --- utility to extract IPs from nested structures ---
 def _extract_ips_recursive(data):
@@ -229,7 +239,6 @@ def check_phishtank(resource):
     if cached:
         return cached
 
-    base_lookup = "https://checkurl.phishtank.com/checkurl/"
     evidence = []
     highest_risk = 'low'
 
@@ -250,7 +259,8 @@ def check_phishtank(resource):
         urls = _extract_urls(resource)
         for url in urls:
             try:
-                r = requests.post(base_lookup, data={"url": url}, timeout=10)
+                # Use the URL defined in globals
+                r = requests.post(PHISHTANK_URL, data={"url": url}, timeout=10)
                 text = r.text.lower()
                 if "in_database" in text and ("true" in text or "true" in text.split("in_database")[-1][:50]):
                     evidence.append(f"{url} found in PhishTank database")
@@ -275,10 +285,6 @@ def check_phishtank(resource):
         result = {'feed': 'phishtank', 'risk_level': 'low', 'evidence': 'No PhishTank findings'}
     set_cached_threat(cache_key, result)
     return result
-
-def max_risk(a, b):
-    order = {'low': 1, 'medium': 2, 'high': 3}
-    return a if order[a] >= order[b] else b
 
 # --- AbuseIPDB ---
 def check_abuseipdb(resource):
@@ -326,17 +332,16 @@ def check_abuseipdb(resource):
 
 
 # --- Main parallel runner / aggregator (MODIFIED) ---
-def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
+def check_threat_feeds(resource, feed_health, feeds=None, max_workers=8, timeout=30):
     """
     resource: dict with fields like 'name', 'type', possibly nested fields that contain IPs/URLs
-    feeds: list of feed ids to run, e.g. ['shodan','alienvault','phishtank','abuseipdb','osint'] or None for all
+    feed_health: dict (from worker) e.g. {'shodan': 'HEALTHY', 'abuseipdb': 'DEGRADED'}
+    feeds: list of feed ids to run, e.g. ['shodan','alienvault','phishtank','abuseipdb'] or None for all
     
-    ✨ --- MODIFIED ---
     Returns a tuple: (highest_threat_dict, skipped_feeds_list)
-    --- END MODIFIED ---
     """
     if feeds is None:
-        feeds = ['shodan', 'alienvault', 'phishtank', 'abuseipdb'] # Removed 'osint' as it's not a feed
+        feeds = ['shodan', 'alienvault', 'phishtank', 'abuseipdb']
 
     feed_map = {
         'shodan': check_shodan,
@@ -345,14 +350,10 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
         'abuseipdb': check_abuseipdb
     }
 
-    # ✨ --- ADDED ---
-    # Get the health status of all feeds
-    feed_health = get_feed_health()
     skipped_feeds = []
-    # --- END ADDED ---
-
     tasks = []
     results = []
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_feed = {}
         for f in feeds:
@@ -360,13 +361,13 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
             if not func:
                 continue
             
-            # ✨ --- ADDED ---
-            # Graceful Degradation Logic
+            # --- Graceful Degradation Logic ---
+            # Check the map passed in from the worker
             if feed_health.get(f) == 'DEGRADED':
                 print(f"Skipping feed {f} as it is marked DEGRADED.")
                 skipped_feeds.append(f)
                 continue
-            # --- END ADDED ---
+            # --- END ---
                 
             future = executor.submit(func, resource)
             future_to_feed[future] = f
@@ -382,11 +383,9 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
                 print(f"Feed {feed_name} failed: {e}")
                 traceback.print_exc()
                 results.append({'feed': feed_name, 'risk_level': 'low', 'evidence': f'Error: {e}'})
-                # ✨ --- ADDED ---
                 # If a feed fails, it was skipped
                 if feed_name not in skipped_feeds:
                     skipped_feeds.append(feed_name) 
-                # --- END ADDED ---
 
     # If no results, return internal low
     if not results:
@@ -405,18 +404,25 @@ def check_threat_feeds(resource, feeds=None, max_workers=8, timeout=30):
         highest_threat['evidence'] = f"Highest risk: {highest_threat.get('risk_level')}. All findings: {combined_evidence}"
         highest_threat['feed'] = f"{highest_threat.get('feed')} (+{len(results)-1} other sources)"
 
-    # ✨ --- MODIFIED ---
     return highest_threat, skipped_feeds
-    # --- END MODIFIED ---
 
 # --- Example usage ---
 if __name__ == "__main__":
+    # You must set environment variables for this to work
+    # export SHODAN_API_KEY="..."
+    # export ABUSEIPDB_API_KEY="..."
+    # export OTX_API_KEY="..."
+    
     sample = {
         "name": "example.com",
         "type": "domain",
         "ip": "8.8.8.8",
         "urls": ["http://example.com/login", "https://malicious.example.test"]
     }
-    out, skipped = check_threat_feeds(sample)
+    
+    # Mock health status (in a real run, the worker lambda provides this)
+    mock_health = {"shodan": "HEALTHY", "abuseipdb": "HEALTHY", "alienvault": "HEALTHY", "phishtank": "HEALTHY"}
+    
+    out, skipped = check_threat_feeds(sample, mock_health)
     print(json.dumps(out, indent=2))
     print(f"Skipped feeds: {skipped}")

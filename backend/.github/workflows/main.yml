@@ -1,0 +1,61 @@
+name: 'Terraform IaC Scan'
+
+on:
+  pull_request:
+
+jobs:
+  scan:
+    name: 'TA-IaC Scan'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 'Checkout Code'
+      uses: actions/checkout@v3
+
+    - name: 'Setup Terraform'
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.7.0
+
+    - name: 'Setup Python'
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: 'Install Python Dependencies'
+      # The runner script only needs 'requests'
+      run: pip install requests
+
+    - name: 'Run TA-IaC Scanner'
+      env:
+        # This secret must be set in your GitHub repo settings
+        TA_IAC_API_URL: ${{ secrets.TA_IAC_API_URL }}
+        TA_IAC_BLOCK_SEVERITY: 'HIGH'
+      
+      # Set the working directory to the folder with the main.tf file
+      working-directory: ./iac-test-project
+      
+      # Call the python script from its location (relative to this step's directory)
+      run: python ../backend/cicd_runner.py
+    
+    - name: 'Post Scan Summary as PR Comment'
+      # This step runs even if the "Run TA-IaC Scanner" step fails
+      if: ${{ always() }} 
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          let reportBody = '### 🛡️ TA-IaC Scan Error\nCould not read scan_report.md. Check the Action logs for details.';
+          try {
+            // Read the report file that the python script created
+            reportBody = fs.readFileSync('./iac-test-project/scan_report.md', 'utf8');
+          } catch (e) {
+            console.log('Could not read report file:', e.message);
+          }
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: reportBody
+          });

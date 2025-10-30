@@ -41,9 +41,12 @@ class TaIacInfraStack(Stack):
         )
 
         # 2️⃣ SQS Queue (No Change)
+        # 2️⃣ SQS Queue (MODIFIED)
         queue = sqs.Queue(
             self, "TaIacScanQueue-5",
-            queue_name="TaIacScanQueue-5"
+            queue_name="TaIacScanQueue-5",
+            # ✨ --- ADDED: Set timeout LONGER than the worker's 300s timeout ---
+            visibility_timeout=Duration.seconds(330) # 5.5 minutes
         )
 
         # Lambda Code Asset (No Change)
@@ -123,8 +126,8 @@ class TaIacInfraStack(Stack):
         queue.grant_send_messages(submitter_lambda)
         queue.grant_consume_messages(worker_lambda)
         table.grant_write_data(worker_lambda)
-        table.grant_write_data(submitter_lambda) 
-        cache_table.grant_read_data(worker_lambda) 
+        table.grant_read_write_data(submitter_lambda) 
+        cache_table.grant_read_write_data(worker_lambda) 
         cache_table.grant_read_write_data(health_check_lambda)
         
         worker_lambda.add_event_source_mapping(

@@ -3,54 +3,23 @@ import boto3
 import os
 import time
 from lib.parser import parse_iac_plan
-from lib.threat_adapters import check_threat_feeds
+# ✨ --- CORRECTED IMPORTS ---
+from lib.threat_adapters import check_threat_feeds, get_feed_health_from_cache
 from lib.correlation_engine import correlate_threats
+# --- END CORRECTIONS ---
 from lib.risk_scoring import calculate_risk
 from lib.explanation_builder import build_explanation
 
 dynamodb = boto3.resource('dynamodb')
-
-# Main results table
-TABLE_NAME = os.environ.get('TABLE_NAME', 'TaIacScanResults-3')
+TABLE_NAME = os.environ.get('TABLE_NAME')
 table = dynamodb.Table(TABLE_NAME)
-
-# New status table (must match the one in health_check_lambda)
-STATUS_TABLE_NAME = os.environ.get('STATUS_TABLE_NAME', 'ThreatFeedStatus-3')
-status_table = dynamodb.Table(STATUS_TABLE_NAME)
-
-
-def get_feed_health_status():
-    """
-    Reads the health status of all feeds from the status table.
-    This is the "Feed Status Check" from Phase III, Step 1[cite: 61].
-    """
-    feed_status = {}
-    try:
-        # Scan the table (it will be small)
-        response = status_table.scan()
-        items = response.get('Items', [])
-        
-        # Convert list to a simple map, e.g., {"NVD": "HEALTHY", "AbuseIPDB": "DEGRADED"}
-        for item in items:
-            feed_status[item['feed_name']] = item.get('status', 'DEGRADED')
-            
-        print(f"Loaded feed health status: {feed_status}")
-        
-    except Exception as e:
-        # If we can't read the status table, we fail open
-        # (i.e., assume all are HEALTHY) to not block scans.
-        print(f"Error reading feed status table, assuming HEALTHY: {e}")
-        return {} # Return empty map, logic in adapter will default to "HEALTHY"
-        
-    return feed_status
-
 
 def lambda_handler(event, context):
     
-    # ---
-    # Step 0: Get current feed health status [cite: 62]
-    # ---
-    feed_status_map = get_feed_health_status()
+    # --- ✨ CORRECTED: Get health status from the right place ---
+    # This reads from TaThreatIntelCache-5, as defined in threat_adapters.py
+    feed_status_map = get_feed_health_from_cache()
+    print(f"Loaded feed health status: {feed_status_map}")
     
     for record in event['Records']:
         scan_id = None
@@ -61,39 +30,35 @@ def lambda_handler(event, context):
 
             if not scan_id:
                 print("Error: Message missing scan_id. Cannot process.")
-                continue # Skip this record
+                continue 
 
-            # Step 1: Parse IaC (Phase I)
+            # Step 1: Parse IaC
             parsed_resources = parse_iac_plan(iac_data)
 
             all_findings = []
             all_skipped_feeds = set()
             
             for res in parsed_resources:
-                # ---
-                # Step 2: Check threat feeds (Phase II, Step 1)
-                # Pass the status map to the adapters [cite: 64]
-                # ---
+                # Step 2: Check threat feeds
+                # ✨ --- CORRECTED: Pass the feed_status_map ---
                 threat_data, skipped = check_threat_feeds(res, feed_status_map)
                 all_skipped_feeds.update(skipped)
                 
-                # Step 3: Correlate threats (Phase II, Step 2)
+                # Step 3: Correlate threats
                 confirmed_findings = correlate_threats(res, threat_data)
 
                 if not confirmed_findings:
                     continue
 
-                # Step 4: Calculate risk (Phase II, Step 3)
+                # Step 4: Calculate risk
                 risk_score = calculate_risk(res, confirmed_findings)
                 
-                # Step 5: Build explanation (Phase I, Step 3)
+                # Step 5: Build explanation
                 explanation = build_explanation(res, confirmed_findings, risk_score)
                 
                 all_findings.append(explanation)
 
             # Step 6: Update DynamoDB item to COMPLETED
-            # The 'skipped_feeds' attribute will now contain feeds that were
-            # skipped due to degradation, fulfilling Phase III, Step 1[cite: 65].
             table.update_item(
                 Key={'scan_id': scan_id},
                 UpdateExpression="SET #st = :s, #ts = :t, #res = :r, #skip = :sk",
@@ -105,7 +70,7 @@ def lambda_handler(event, context):
                 },
                 ExpressionAttributeValues={
                     ':s': 'COMPLETED',
-                    't': int(time.time()),
+                    ':t': int(time.time()),
                     ':r': json.dumps(all_findings),
                     ':sk': list(all_skipped_feeds)
                 }
@@ -114,6 +79,7 @@ def lambda_handler(event, context):
 
         except Exception as e:
             print(f"Error processing message for scan_id {scan_id}: {e}")
+            # If an error occurs, update the status to FAILED
             if scan_id:
                 try:
                     table.update_item(

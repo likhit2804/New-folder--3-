@@ -391,20 +391,8 @@ def check_threat_feeds(resource, feed_health, feeds=None, max_workers=8, timeout
     if not results:
         return {'feed': 'internal-assessment', 'risk_level': 'low', 'evidence': f"No threats identified for {resource.get('name','unknown')}"}, skipped_feeds
 
-    # Determine highest risk across feeds
-    risk_priority = {'low': 1, 'medium': 2, 'high': 3}
-    highest_threat = {'feed': 'internal-assessment', 'risk_level': 'low', 'evidence': f"No threats identified for {resource.get('name','unknown')}"}
-    for t in results:
-        if risk_priority.get(t.get('risk_level', 'low'), 0) > risk_priority.get(highest_threat.get('risk_level', 'low'), 0):
-            highest_threat = t
-
-    # Combine evidence when multiple feeds
-    if len(results) > 1:
-        combined_evidence = "; ".join([f"[{t.get('feed')} ({t.get('risk_level')})]: {t.get('evidence')}" for t in results])
-        highest_threat['evidence'] = f"Highest risk: {highest_threat.get('risk_level')}. All findings: {combined_evidence}"
-        highest_threat['feed'] = f"{highest_threat.get('feed')} (+{len(results)-1} other sources)"
-
-    return highest_threat, skipped_feeds
+    # The correlation engine expects the full list of findings, not just the highest one.
+    return results, skipped_feeds
 
 # --- Example usage ---
 if __name__ == "__main__":

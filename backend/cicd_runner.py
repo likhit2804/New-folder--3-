@@ -195,7 +195,7 @@ def main():
     
     # Save report to a file for use as a PR comment or artifact
     try:
-        with open("scan_report.md", "w") as f:
+        with open("scan_report.md", "w", encoding="utf-8") as f:
             f.write(report_md)
         print("\nReport saved to scan_report.md")
     except Exception as e:
